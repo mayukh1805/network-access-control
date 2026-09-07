@@ -26,6 +26,11 @@ PRINTER_NET="10.77.30"   # protected resources
 SVC_NET="10.77.40"       # postgres, redis, freeradius
 UPLINK_NET="10.77.0"     # gw <-> root namespace
 
+GUEST_IPV6="fd77:10::"     # guest segment
+PRINTER_IPV6="fd77:30::"   # protected resources
+SVC_IPV6="fd77:40::"       # services
+UPLINK_IPV6="fd77:0::"     # gw <-> root namespace
+
 PORTAL_PORT=8080
 NAMESPACES=(gw guest-a guest-b svc printer)
 RUNDIR=/run/nac-lab
@@ -33,6 +38,7 @@ RUNDIR=/run/nac-lab
 # ------------------------------------------------------------- utilities ----
 
 log()  { printf '\033[36m==>\033[0m %s\n' "$*"; }
+audit_event() { logger -t nac "$*"; }
 warn() { printf '\033[33m[!]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
@@ -60,11 +66,10 @@ make_namespaces() {
   for ns in "${NAMESPACES[@]}"; do
     ip netns add "$ns" 2>/dev/null || warn "namespace $ns already exists"
     nsx "$ns" ip link set lo up
-    # Decision #5 from the plan: IPv6 is explicitly disabled, not ignored.
-    nsx "$ns" sysctl -qw net.ipv6.conf.all.disable_ipv6=1
-    nsx "$ns" sysctl -qw net.ipv6.conf.default.disable_ipv6=1
+    # IPv6 is enabled for dual-stack NAC enforcement.
   done
   gw sysctl -qw net.ipv4.ip_forward=1
+  gw sysctl -qw net.ipv6.conf.all.forwarding=1
 
   # Namespaces share /etc/resolv.conf with the host unless given their own.
   # Without this, guests try to reach the host's upstream resolver, which is
@@ -91,6 +96,7 @@ make_topology() {
   gw ip link add br-guest type bridge
   gw ip link set br-guest up
   gw ip addr add "${GUEST_NET}.1/24" dev br-guest
+  gw ip -6 addr add "${GUEST_IPV6}1/64" dev br-guest
 
   for g in a b; do
     link "veth-g${g}" "guest-${g}" eth0
@@ -100,29 +106,42 @@ make_topology() {
   # Static addressing so the lab comes up deterministically. dnsmasq is running
   # too — run `dhclient eth0` inside a guest to exercise the DHCP path.
   nsx guest-a ip addr add "${GUEST_NET}.100/24" dev eth0
+  nsx guest-a ip -6 addr add "${GUEST_IPV6}100/64" dev eth0
   nsx guest-a ip route add default via "${GUEST_NET}.1"
+  nsx guest-a ip -6 route add default via "${GUEST_IPV6}1"
   nsx guest-b ip addr add "${GUEST_NET}.101/24" dev eth0
+  nsx guest-b ip -6 addr add "${GUEST_IPV6}101/64" dev eth0
   nsx guest-b ip route add default via "${GUEST_NET}.1"
+  nsx guest-b ip -6 route add default via "${GUEST_IPV6}1"
 
   log "wiring the protected segment"
   link vprn printer eth0
   gw ip addr add "${PRINTER_NET}.1/24" dev vprn
+  gw ip -6 addr add "${PRINTER_IPV6}1/64" dev vprn
   nsx printer ip addr add "${PRINTER_NET}.10/24" dev eth0
+  nsx printer ip -6 addr add "${PRINTER_IPV6}10/64" dev eth0
   nsx printer ip route add default via "${PRINTER_NET}.1"
+  nsx printer ip -6 route add default via "${PRINTER_IPV6}1"
 
   log "wiring the services segment"
   link vsvc svc eth0
   gw ip addr add "${SVC_NET}.1/24" dev vsvc
+  gw ip -6 addr add "${SVC_IPV6}1/64" dev vsvc
   nsx svc ip addr add "${SVC_NET}.10/24" dev eth0
+  nsx svc ip -6 addr add "${SVC_IPV6}10/64" dev eth0
   nsx svc ip route add default via "${SVC_NET}.1"
+  nsx svc ip -6 route add default via "${SVC_IPV6}1"
 
   log "wiring the uplink"
   ip link add nac-up0 type veth peer name up0 netns gw
   ip link set nac-up0 up
   ip addr add "${UPLINK_NET}.1/30" dev nac-up0
+  ip -6 addr add "${UPLINK_IPV6}1/64" dev nac-up0
   gw ip link set up0 up
   gw ip addr add "${UPLINK_NET}.2/30" dev up0
+  gw ip -6 addr add "${UPLINK_IPV6}2/64" dev up0
   gw ip route add default via "${UPLINK_NET}.1"
+  gw ip -6 route add default via "${UPLINK_IPV6}1"
 }
 
 make_firewall() {
@@ -139,6 +158,15 @@ table inet nac {
   # authentication — this set is the authorization layer.
   set printer_allowed {
     type ipv4_addr
+    flags timeout
+  }
+  set authenticated6 {
+    type ipv6_addr
+    flags timeout
+  }
+
+  set printer_allowed6 {
+    type ipv6_addr
     flags timeout
   }
 
@@ -168,7 +196,16 @@ table inet nac {
     # ICMP to the gateway. Diagnostics need this, and a gateway that does not
     # answer ping is indistinguishable from a gateway that is down.
     iifname "br-guest" icmp type { echo-request, destination-unreachable, time-exceeded } accept
-
+        # IPv6 control and diagnostic traffic.
+    iifname "br-guest" icmpv6 type {
+      nd-neighbor-solicit,
+      nd-neighbor-advert,
+      nd-router-solicit,
+      nd-router-advert,
+      echo-request,
+      destination-unreachable,
+      time-exceeded
+    } accept
     # Services and printer segments talk to the gateway freely.
     iifname { "vsvc", "vprn" } accept
 
@@ -183,9 +220,15 @@ table inet nac {
     # Authenticated clients reach the uplink.
     iifname "br-guest" ip saddr @authenticated oifname "up0" accept
 
+    # Authenticated IPv6 clients reach the uplink.
+    iifname "br-guest" ip6 saddr @authenticated6 oifname "up0" accept
+
     # Authorized clients reach the printer. Note both sets are required:
     # authentication alone does not grant this.
     iifname "br-guest" ip saddr @printer_allowed oifname "vprn" accept
+
+    # Authorized IPv6 clients reach the printer.
+    iifname "br-guest" ip6 saddr @printer_allowed6 oifname "vprn" accept
 
     # Everything else, including guest-to-guest, is dropped.
     # (Guest isolation is enforced by the bridge hairpin block below.)
@@ -299,10 +342,43 @@ cmd_shell() {
 
 # ---------------------------------------------------------- set control -----
 
-cmd_auth()   { require_root; gw nft add element inet nac authenticated   "{ $1 timeout 1h }"; log "authenticated $1"; }
-cmd_deauth() { require_root; gw nft delete element inet nac authenticated "{ $1 }"; log "deauthenticated $1"; }
-cmd_grant()  { require_root; gw nft add element inet nac printer_allowed "{ $1 timeout 1h }"; log "printer access granted to $1"; }
-cmd_revoke() { require_root; gw nft delete element inet nac printer_allowed "{ $1 }"; log "printer access revoked from $1"; }
+cmd_auth() {
+  require_root
+  if [[ "$1" == *:* ]]; then
+    gw nft add element inet nac authenticated6 "{ $1 timeout 1h }"
+  else
+    gw nft add element inet nac authenticated "{ $1 timeout 1h }"
+  fi
+  log "authenticated $1"
+}
+cmd_deauth() {
+  require_root
+  if [[ "$1" == *:* ]]; then
+    gw nft delete element inet nac authenticated6 "{ $1 }"
+  else
+    gw nft delete element inet nac authenticated "{ $1 }"
+  fi
+  log "deauthenticated $1"
+}
+cmd_grant() {
+  require_root
+  if [[ "$1" == *:* ]]; then
+    gw nft add element inet nac printer_allowed6 "{ $1 timeout 1h }"
+  else
+    gw nft add element inet nac printer_allowed "{ $1 timeout 1h }"
+  fi
+  log "printer access granted to $1"
+}
+cmd_revoke() {
+  require_root
+  if [[ "$1" == *:* ]]; then
+    gw nft delete element inet nac printer_allowed6 "{ $1 }"
+  else
+    gw nft delete element inet nac printer_allowed "{ $1 }"
+  fi
+  log "printer access revoked from $1"
+  audit_event "NAC AUTHORIZATION_REVOKED ip=$1 resource=printer"
+}
 
 # ----------------------------------------------------------------- test -----
 
