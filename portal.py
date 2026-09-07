@@ -14,6 +14,7 @@ import argparse
 import html
 import json
 import subprocess
+import syslog
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -22,6 +23,12 @@ USERS = {
     "avi":   {"password": "demo", "printer": True},
     "guest": {"password": "demo", "printer": False},
 }
+
+def log_event(event: str, **context) -> None:
+    details = " ".join(f"{key}={value}" for key, value in context.items())
+    message = f"NAC {event}" + (f" {details}" if details else "")
+    syslog.syslog(syslog.LOG_INFO, message)
+
 
 LOGIN_PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -110,16 +117,19 @@ class Handler(BaseHTTPRequestHandler):
 
         record = USERS.get(user)
         if not record or record["password"] != pw:
-            print(f"DENY  {ip} user={user!r}")
+            log_event("LOGIN_FAILURE", ip=ip, user=user)
             self._send(401, LOGIN_PAGE.format(error="Invalid credentials"))
             return
 
         if not authorize(ip, record["printer"]):
+            log_event("ACCESS_DENIED", ip=ip, user=user, resource="printer")
             self._send(500, LOGIN_PAGE.format(error="Could not apply policy"))
             return
 
         role = "internet + printer" if record["printer"] else "internet only"
-        print(f"ALLOW {ip} user={user!r} role={role}")
+        if record["printer"]:
+            log_event("ACCESS_GRANTED", ip=ip, user=user, resource="printer")
+        log_event("LOGIN_SUCCESS", ip=ip, user=user, role=role)
         self._send(200, SUCCESS_PAGE % html.escape(f"{user} — {role}"))
 
     def log_message(self, *_):
