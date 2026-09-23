@@ -3,24 +3,14 @@ package enforce
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 func AllowPrinter(ip string) error {
 	cmd := exec.Command(
-		"sudo",
-		"ip",
-		"netns",
-		"exec",
-		"gw",
-		"nft",
-		"add",
-		"element",
-		"inet",
-		"nac",
-		"printer_allowed",
-		"{",
-		ip,
-		"}",
+		"sudo", "ip", "netns", "exec", "gw",
+		"nft", "add", "element", "inet", "nac",
+		"printer_allowed", "{", ip, "}",
 	)
 
 	output, err := cmd.CombinedOutput()
@@ -33,24 +23,24 @@ func AllowPrinter(ip string) error {
 
 func RevokePrinter(ip string) error {
 	cmd := exec.Command(
-		"sudo",
-		"ip",
-		"netns",
-		"exec",
-		"gw",
-		"nft",
-		"delete",
-		"element",
-		"inet",
-		"nac",
-		"printer_allowed",
-		"{", ip,
-		"}",
+		"sudo", "ip", "netns", "exec", "gw",
+		"nft", "delete", "element", "inet", "nac",
+		"printer_allowed", "{", ip, "}",
 	)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to revoke printer access: %s: %w", output, err)
+		if strings.Contains(string(output), "Could not process rule") &&
+			strings.Contains(string(output), ip) {
+			fmt.Printf("Printer access already revoked for %s\n", ip)
+			return nil
+		}
+
+		return fmt.Errorf(
+			"failed to revoke printer access: %s: %w",
+			output,
+			err,
+		)
 	}
 
 	return nil

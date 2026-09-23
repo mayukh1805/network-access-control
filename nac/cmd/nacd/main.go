@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/jackc/pgx/v5"
+	"nac/internal/audit"
 	"nac/internal/database"
 	"nac/internal/enforce"
 	"nac/internal/policy"
@@ -29,6 +30,27 @@ func main() {
 		os.Exit(1)
 	}
 	defer conn.Close(ctx)
+
+	expiredSessions, err := database.ExpireSessions(ctx, conn)
+	if err != nil {
+		fmt.Println("Session expiry update failed:", err)
+		os.Exit(1)
+	}
+
+	for _, sessionID := range expiredSessions {
+		eventType := "SESSION_EXPIRED"
+
+		if err := audit.Log(ctx, conn, audit.Event{
+			SessionID: &sessionID,
+			EventType: eventType,
+			Details: map[string]any{
+				"reason": "session_expired",
+			},
+		}); err != nil {
+			fmt.Println("Session expiry audit failed:", err)
+			os.Exit(1)
+		}
+	}
 
 	user, err := database.GetUser(ctx, conn, "avi")
 	if err != nil {
@@ -58,6 +80,24 @@ func main() {
 		fmt.Println("Device lookup failed:", err)
 		os.Exit(1)
 	}
+	binding, err := database.GetActiveBinding(ctx, conn, activeSession.DeviceID, activeSession.IP)
+	if err != nil {
+		fmt.Println("No valid device/IP binding:", err)
+		fmt.Println("Revoking printer access")
+		if err := enforce.RevokePrinter(activeSession.IP.String()); err != nil {
+			fmt.Println("Revocation failed:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	fmt.Printf(
+		"Binding=%d Device=%d IP=%s Status=%s\n",
+		binding.ID,
+		binding.DeviceID,
+		binding.IP,
+		binding.Status,
+	)
 
 	devicePosture := posture.CheckDeviceStatus(device.Status)
 
@@ -103,6 +143,28 @@ func main() {
 
 	decision := policy.Evaluate(user.Role, resource, action)
 	shouldAllow := decision == policy.Allow
+
+	eventType := "POLICY_DENY"
+	if shouldAllow {
+		eventType = "POLICY_ALLOW"
+	}
+
+	if err := audit.Log(ctx, conn, audit.Event{
+		UserID:    &user.ID,
+		DeviceID:  &device.ID,
+		SessionID: &activeSession.ID,
+		EventType: eventType,
+		Resource:  &resource,
+		Action:    &action,
+		Decision:  (*string)(&decision),
+		SourceIP:  &ip,
+		Details: map[string]any{
+			"role": user.Role,
+		},
+	}); err != nil {
+		fmt.Println("Audit logging failed:", err)
+		os.Exit(1)
+	}
 
 	if err := reconcile.EnsurePrinterAccess(ip, shouldAllow); err != nil {
 		fmt.Println("Reconciliation failed:", err)

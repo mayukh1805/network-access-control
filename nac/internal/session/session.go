@@ -41,3 +41,36 @@ func GetActiveSession(ctx context.Context, conn *pgx.Conn, userID int) (Session,
 
 	return s, err
 }
+func CreateSession(
+	ctx context.Context,
+	conn *pgx.Conn,
+	userID int,
+	deviceID int,
+	ip netip.Addr,
+	token string,
+	expiresAt time.Time,
+) (Session, error) {
+	var s Session
+
+	err := conn.QueryRow(
+		ctx,
+		`INSERT INTO sessions
+            (user_id, device_id, session_token, ip_address, expires_at, status)
+         VALUES ($1, $2, $3, $4, $5, 'active')
+         RETURNING id, user_id, device_id, ip_address, status, expires_at`,
+		userID,
+		deviceID,
+		token,
+		ip,
+		expiresAt,
+	).Scan(
+		&s.ID,
+		&s.UserID,
+		&s.DeviceID,
+		&s.IP,
+		&s.Status,
+		&s.ExpiresAt,
+	)
+
+	return s, err
+}
