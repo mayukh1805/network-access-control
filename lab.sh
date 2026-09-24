@@ -385,6 +385,11 @@ cmd_revoke() {
 cmd_test() {
   require_root
   local pass=0 fail=0
+
+    # Reset dynamic authorization state so every test starts clean.
+  gw nft flush set inet nac authenticated 2>/dev/null || true
+  gw nft flush set inet nac printer_allowed 2>/dev/null || true
+
   check() {
     local desc=$1; shift
     # Note: pass=$((pass+1)), not ((pass++)). Post-increment returns the OLD

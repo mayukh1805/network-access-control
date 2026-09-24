@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/oauth2"
+	"html"
 	"nac/internal/database"
 	"nac/internal/oidc"
 	"nac/internal/policy"
@@ -90,6 +91,17 @@ func main() {
 		if bindingErr == nil {
 			bindingStatus = "ACTIVE"
 		}
+
+		safeUsername := html.EscapeString(user.Username)
+		safeRole := html.EscapeString(user.Role)
+		safeHostname := html.EscapeString(device.Hostname)
+		safeMAC := html.EscapeString(device.MAC)
+		safeIP := html.EscapeString(nacSession.IP.String())
+		safeDeviceStatus := html.EscapeString(device.Status)
+		safeBindingStatus := html.EscapeString(bindingStatus)
+		safeSessionStatus := html.EscapeString(nacSession.Status)
+		safePolicyDecision := html.EscapeString(string(policyDecision))
+		safePostureStatus := html.EscapeString(postureStatus)
 
 		fmt.Fprintf(w, `
 <!DOCTYPE html>
@@ -176,18 +188,18 @@ func main() {
 </body>
 </html>
 `,
-			user.Username,
-			user.Role,
-			device.Hostname,
-			device.MAC,
-			nacSession.IP,
-			device.Status,
-			bindingStatus,
+			safeUsername,
+			safeRole,
+			safeHostname,
+			safeMAC,
+			safeIP,
+			safeDeviceStatus,
+			safeBindingStatus,
 			nacSession.ID,
-			nacSession.Status,
+			safeSessionStatus,
 			nacSession.ExpiresAt.Format("2006-01-02 15:04:05"),
-			policyDecision,
-			postureStatus,
+			safePolicyDecision,
+			safePostureStatus,
 		)
 	})
 
@@ -209,6 +221,7 @@ func main() {
 			Value:    state + "|" + verifier,
 			Path:     "/",
 			HttpOnly: true,
+			Secure:   true,
 			SameSite: http.SameSiteLaxMode,
 		})
 
@@ -326,6 +339,7 @@ func main() {
 			Path:     "/",
 			MaxAge:   -1,
 			HttpOnly: true,
+			Secure:   true,
 			SameSite: http.SameSiteLaxMode,
 		})
 

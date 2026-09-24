@@ -3,6 +3,7 @@ package enforce
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 func Quarantine(ip string) error {
@@ -28,15 +29,21 @@ func RemoveQuarantine(ip string) error {
 	)
 
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// Element is already absent, so desired state is already achieved.
-		if string(output) != "" {
-			fmt.Printf("Quarantine already absent for %s\n", ip)
-			return nil
-		}
-
-		return fmt.Errorf("failed to remove quarantine for %s: %w", ip, err)
+	if err == nil {
+		return nil
 	}
 
-	return nil
+	// If the quarantine set or element does not exist, there is
+	// nothing to remove. Treat that as a successful no-op.
+	if strings.Contains(string(output), "No such file or directory") {
+		fmt.Printf("Quarantine already absent for %s\n", ip)
+		return nil
+	}
+
+	return fmt.Errorf(
+		"failed to remove quarantine for %s: %s: %w",
+		ip,
+		output,
+		err,
+	)
 }
