@@ -36,6 +36,161 @@ func main() {
 		panic(err)
 	}
 
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+
+		cookie, err := r.Cookie("nac_session")
+		if err != nil {
+			http.Error(w, "Not authenticated. Please login with Keycloak.", http.StatusUnauthorized)
+			return
+		}
+
+		nacSession, err := session.GetSessionByToken(r.Context(), conn, cookie.Value)
+		if err != nil {
+			http.Error(w, "Session expired or invalid. Please login again.", http.StatusUnauthorized)
+			return
+		}
+
+		user, err := database.GetUserByID(r.Context(), conn, nacSession.UserID)
+		if err != nil {
+			http.Error(w, "User lookup failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		device, err := database.GetDevice(r.Context(), conn, nacSession.DeviceID)
+		if err != nil {
+			http.Error(w, "Device lookup failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		_, bindingErr := database.GetActiveBinding(
+			r.Context(),
+			conn,
+			device.ID,
+			nacSession.IP,
+		)
+
+		postureStatus := "UNKNOWN"
+		if device.Status == "active" {
+			postureStatus = "HEALTHY"
+		} else {
+			postureStatus = "UNHEALTHY"
+		}
+
+		policyDecision := policy.Evaluate(
+			user.Role,
+			"printer",
+			"print",
+		)
+
+		bindingStatus := "INVALID"
+		if bindingErr == nil {
+			bindingStatus = "ACTIVE"
+		}
+
+		fmt.Fprintf(w, `
+<!DOCTYPE html>
+<html>
+<head>
+	<title>NAC Dashboard</title>
+	<meta charset="UTF-8">
+	<style>
+		body {
+			font-family: Arial, sans-serif;
+			max-width: 900px;
+			margin: 40px auto;
+			padding: 20px;
+		}
+		table {
+			width: 100%%;
+			border-collapse: collapse;
+			margin-bottom: 25px;
+		}
+		th, td {
+			border: 1px solid #ccc;
+			padding: 10px;
+			text-align: left;
+		}
+		th {
+			background: #f2f2f2;
+		}
+		.status {
+			font-weight: bold;
+		}
+	</style>
+</head>
+
+<body>
+
+<h1>Network Access Control Dashboard</h1>
+
+<p>🔒 <strong>HTTPS connection established</strong></p>
+
+<h2>Identity</h2>
+
+<table>
+<tr><th>User</th><td>%s</td></tr>
+<tr><th>Role</th><td>%s</td></tr>
+</table>
+
+<h2>Device</h2>
+
+<table>
+<tr><th>Hostname</th><td>%s</td></tr>
+<tr><th>MAC Address</th><td>%s</td></tr>
+<tr><th>IP Address</th><td>%s</td></tr>
+<tr><th>Device Status</th><td class="status">%s</td></tr>
+<tr><th>Binding</th><td class="status">%s</td></tr>
+</table>
+
+<h2>Session</h2>
+
+<table>
+<tr><th>Session ID</th><td>%d</td></tr>
+<tr><th>Status</th><td class="status">%s</td></tr>
+<tr><th>Expires</th><td>%s</td></tr>
+</table>
+
+<h2>Authorization</h2>
+
+<table>
+<tr><th>Resource</th><td>Printer</td></tr>
+<tr><th>Action</th><td>Print</td></tr>
+<tr><th>Policy Decision</th><td class="status">%s</td></tr>
+<tr><th>Device Posture</th><td class="status">%s</td></tr>
+</table>
+
+<h2>System</h2>
+
+<table>
+<tr><th>NAC Controller</th><td>ONLINE</td></tr>
+<tr><th>PostgreSQL</th><td>CONNECTED</td></tr>
+<tr><th>Keycloak OIDC</th><td>CONNECTED</td></tr>
+<tr><th>Transport</th><td>HTTPS / TLS</td></tr>
+<tr><th>Enforcement</th><td>nftables</td></tr>
+</table>
+
+</body>
+</html>
+`,
+			user.Username,
+			user.Role,
+			device.Hostname,
+			device.MAC,
+			nacSession.IP,
+			device.Status,
+			bindingStatus,
+			nacSession.ID,
+			nacSession.Status,
+			nacSession.ExpiresAt.Format("2006-01-02 15:04:05"),
+			policyDecision,
+			postureStatus,
+		)
+	})
+
 	http.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
 		state, err := randomString(32)
 		if err != nil {
@@ -144,6 +299,16 @@ func main() {
 			http.Error(w, "session creation failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		http.SetCookie(w, &http.Cookie{
+			Name:     "nac_session",
+			Value:    sessionToken,
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+		})
+
 		decision := policy.Evaluate(user.Role, "printer", "print")
 		fmt.Printf(
 			"OIDC user=%s PostgreSQL role=%s Policy decision=%s Session ID=%d IP=%s Expires=%s\n",
@@ -164,24 +329,18 @@ func main() {
 			SameSite: http.SameSiteLaxMode,
 		})
 
-		fmt.Fprintf(
-			w,
-			"<html><body><h1>OIDC Authentication Successful</h1>"+
-				"<p><strong>User:</strong> %s</p>"+
-				"<p><strong>Email:</strong> %s</p>"+
-				"<p><strong>Subject:</strong> %s</p>"+
-				"<p><strong>Role:</strong> %s</p>"+
-				"</body></html>",
-			claims.PreferredUsername,
-			claims.Email,
-			claims.Subject,
-			user.Role,
-		)
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
 	})
 
-	fmt.Println("NAC OIDC server listening on :8081")
+	fmt.Println("NAC HTTPS dashboard listening on :8443")
 
-	if err := http.ListenAndServe(":8081", nil); err != nil {
+	if err := http.ListenAndServeTLS(
+		":8443",
+		"certs/nac-dashboard.crt",
+		"certs/nac-dashboard.key",
+		nil,
+	); err != nil {
 		panic(err)
 	}
 }

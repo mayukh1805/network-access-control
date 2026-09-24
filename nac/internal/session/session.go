@@ -74,3 +74,24 @@ func CreateSession(
 
 	return s, err
 }
+func GetSessionByToken(ctx context.Context, conn *pgx.Conn, token string) (Session, error) {
+	var s Session
+
+	err := conn.QueryRow(ctx,
+		`SELECT id, user_id, device_id, ip_address, status, expires_at
+		 FROM sessions
+		 WHERE session_token = $1
+		   AND status = 'active'
+		   AND expires_at > CURRENT_TIMESTAMP`,
+		token).
+		Scan(
+			&s.ID,
+			&s.UserID,
+			&s.DeviceID,
+			&s.IP,
+			&s.Status,
+			&s.ExpiresAt,
+		)
+
+	return s, err
+}

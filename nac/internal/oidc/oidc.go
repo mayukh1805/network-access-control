@@ -49,7 +49,7 @@ func NewProvider(ctx context.Context) (*Provider, error) {
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
 		Endpoint:     provider.Endpoint(),
-		RedirectURL:  "http://192.168.80.129:8081/callback",
+		RedirectURL:  "https://192.168.80.129:8443/callback",
 		Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
 	}
 

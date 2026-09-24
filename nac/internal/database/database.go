@@ -54,3 +54,16 @@ func GetDevice(ctx context.Context, conn *pgx.Conn, deviceID int) (Device, error
 
 	return device, err
 }
+func GetUserByID(ctx context.Context, conn *pgx.Conn, userID int) (User, error) {
+	var user User
+
+	err := conn.QueryRow(ctx,
+		`SELECT u.id, u.username, r.name
+		 FROM users u
+		 LEFT JOIN roles r ON u.role_id = r.id
+		 WHERE u.id = $1`,
+		userID).
+		Scan(&user.ID, &user.Username, &user.Role)
+
+	return user, err
+}
