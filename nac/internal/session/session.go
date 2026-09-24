@@ -95,3 +95,25 @@ func GetSessionByToken(ctx context.Context, conn *pgx.Conn, token string) (Sessi
 
 	return s, err
 }
+func GetLatestActiveSession(ctx context.Context, conn *pgx.Conn) (Session, error) {
+	var s Session
+
+	err := conn.QueryRow(
+		ctx,
+		`SELECT id, user_id, device_id, ip_address, status, expires_at
+		 FROM sessions
+		 WHERE status = 'active'
+		   AND expires_at > CURRENT_TIMESTAMP
+		 ORDER BY id DESC
+		 LIMIT 1`,
+	).Scan(
+		&s.ID,
+		&s.UserID,
+		&s.DeviceID,
+		&s.IP,
+		&s.Status,
+		&s.ExpiresAt,
+	)
+
+	return s, err
+}

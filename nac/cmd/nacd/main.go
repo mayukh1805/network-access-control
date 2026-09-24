@@ -52,24 +52,20 @@ func main() {
 		}
 	}
 
-	user, err := database.GetUser(ctx, conn, "avi")
-	if err != nil {
-		fmt.Println("User lookup failed:", err)
-		os.Exit(1)
-	}
-
-	activeSession, err := session.GetActiveSession(ctx, conn, user.ID)
+	activeSession, err := session.GetLatestActiveSession(ctx, conn)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			fmt.Println("No active session: revoking printer access")
-			if err := enforce.RevokePrinter("10.77.10.100"); err != nil {
-				fmt.Println("Revocation failed:", err)
-				os.Exit(1)
-			}
+			fmt.Println("No active sessions")
 			return
 		}
 
 		fmt.Println("Session lookup failed:", err)
+		os.Exit(1)
+	}
+
+	user, err := database.GetUserByID(ctx, conn, activeSession.UserID)
+	if err != nil {
+		fmt.Println("User lookup failed:", err)
 		os.Exit(1)
 	}
 
